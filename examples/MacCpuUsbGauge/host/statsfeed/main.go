@@ -9,6 +9,7 @@
 // -once: одна строка в stdout (+ запись в -port если задан). -quiet: меньше служебных логов.
 // -smooth: EMA для CPU/RAM/load/disk (0=выкл). -list-esp: только VID 303A.
 // macOS/Windows: по умолчанию трей (Fyne) + окно «Параметры…»; -foreground — только терминал.
+// macOS: при трее процесс перезапускается в фоне — окно Terminal после старта закрывается; логи в ~/Library/Logs/statsfeed.log.
 
 package main
 
@@ -19,9 +20,11 @@ import (
 	"fmt"
 	"log"
 	"os"
+	"os/signal"
 	"runtime"
 	"strings"
 	"sync"
+	"syscall"
 	"time"
 
 	"github.com/shirou/gopsutil/v4/cpu"
@@ -261,6 +264,11 @@ func main() {
 
 	useTray := (runtime.GOOS == "darwin" || runtime.GOOS == "windows") && !*foreground
 	if useTray {
+		maybeDetachTrayDarwin()
+		if isTrayDetachedChild() {
+			signal.Ignore(syscall.SIGHUP)
+		}
+		setupTrayLogForGUI()
 		vlogf("режим трея: иконка statsfeed; «Параметры…» — настройки; «Выход» — завершение.")
 		ctx, cancel := context.WithCancel(context.Background())
 		defer cancel()
