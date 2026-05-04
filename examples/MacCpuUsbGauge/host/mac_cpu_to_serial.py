@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """
 Кроссплатформенная отправка метрик на T-Display-S3 (USB CDC).
-Формат: cpu%,ram%,load1m,disk%,cpuTempC,rx_mbps,tx_mbps\n
+Формат: 12 полей (см. statsfeed README) + при необходимости строка H …; rx/tx в Мбит/с.
 
 При отключении USB скрипт не завершается: пауза и повторное открытие порта.
 
@@ -200,9 +200,10 @@ def smooth_values(
 def format_line(
     cpu: float, ram: float, load1: float, disk: float, temp: float, rx_mbps: float, tx_mbps: float
 ) -> str:
+    # хвост: wcpu, wram, wdisk, wtemp, net_max (как в statsfeed / прошивке v2)
     return (
         f"{cpu:.1f},{ram:.1f},{load1:.2f},{disk:.1f},{temp:.1f},"
-        f"{rx_mbps:.2f},{tx_mbps:.2f}\n"
+        f"{rx_mbps:.2f},{tx_mbps:.2f},85,88,92,85,100\n"
     )
 
 

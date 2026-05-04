@@ -1,8 +1,13 @@
 /**
  * Mac/PC metrics over USB CDC, 320x170.
  * Поворот 180 градусов: LVGL sw_rotate + ROT_180 (не зеркало панели).
- * Протокол: cpu%,ram%,load1m,disk%,cpuTempC,rx_mbps,tx_mbps\n
- *   (temp=-1 нет датчика; 5 полей — без сети; rx/tx — скорость всех не-loopback интерфейсов, Мбит/с)
+ * Протокол (основная строка): cpu%,ram%,load1m,disk%,cpuTempC,rx_Mb/s,tx_Mb/s[,wcpu,wram,wdisk,wtemp,net_max_Mb/s]\n
+ *   Опционально 12 полей: пороги предупреждений и шкала сети с хоста (defaults как ниже).
+ *   Отдельные строки:
+ *   "H имя\\n" — подпись в статус-баре (до ~32 символов).
+ *   "P n\\n" — экран n = 1..5 (как кнопки), сохраняется в NVS.
+ *   "R" или "RESET_PEAKS" — сброс пиков pk/rk на экране Peaks.
+ *   temp=-1 нет датчика; rx/tx — сумма не-loopback, мегабит/с.
  * Хост: host/statsfeed или host/mac_cpu_to_serial.py
  * Экраны: 1 CPU+RAM, 2 LOAD+DISK, 3 CPU+TEMP, 4 пики pk/rk, 5 сеть DN/UP.
  * Кнопка 0: след. экран, кнопка 14: пред.
@@ -11,6 +16,7 @@
  */
 
 #include "Arduino.h"
+#include <Preferences.h>
 #include "lv_conf.h"
 #include "lvgl.h"
 #include "OneButton.h"
@@ -32,6 +38,17 @@
 #define RAM_WARN_PCT  88.0f
 #define DISK_WARN_PCT 92.0f
 #define TEMP_WARN_C   85.0f
+
+/* Переопределяются хостом при 12 полях в строке метрик */
+static float g_warn_cpu = CPU_WARN_PCT;
+static float g_warn_ram = RAM_WARN_PCT;
+static float g_warn_disk = DISK_WARN_PCT;
+static float g_warn_temp = TEMP_WARN_C;
+static float g_net_max_mbps = NET_METER_MAX_MBPS;
+
+static String g_host_suffix = "";
+
+static Preferences g_prefs;
 
 typedef struct {
     uint8_t cmd;
@@ -326,7 +343,7 @@ static void apply_page0(float cpu, float ram, bool have_ram)
     char buf[28];
     snprintf(buf, sizeof(buf), "%.0f%%", cpu);
     lv_label_set_text(pages[0].lbl_a, buf);
-    if (cpu >= CPU_WARN_PCT)
+    if (cpu >= g_warn_cpu)
         lv_obj_set_style_text_color(pages[0].lbl_a, lv_color_hex(0xf87171), LV_PART_MAIN);
     else
         lv_obj_set_style_text_color(pages[0].lbl_a, lv_color_hex(0xf0f2f8), LV_PART_MAIN);
@@ -339,7 +356,7 @@ static void apply_page0(float cpu, float ram, bool have_ram)
         anim_meter_go(&g_ma0b, (int32_t)(ram + 0.5f));
         snprintf(buf, sizeof(buf), "%.0f%%", ram);
         lv_label_set_text(pages[0].lbl_b, buf);
-        if (ram >= RAM_WARN_PCT)
+        if (ram >= g_warn_ram)
             lv_obj_set_style_text_color(pages[0].lbl_b, lv_color_hex(0xfbbf24), LV_PART_MAIN);
         else
             lv_obj_set_style_text_color(pages[0].lbl_b, lv_color_hex(0xf0f2f8), LV_PART_MAIN);
@@ -368,9 +385,26 @@ static void apply_page3_peaks(void)
     lv_label_set_text(pages[3].lbl_b, buf);
 }
 
+/* mbps — мегабит/с (как на хосте); подпись Mb/s vs kb/s для читаемости */
+static void fmt_net_speed_mbps(char *buf, size_t sz, float mbps)
+{
+    if (mbps < 0.f)
+        mbps = 0.f;
+    if (mbps >= 100.f) {
+        snprintf(buf, sz, "%.0f Mb/s", mbps);
+    } else if (mbps >= 1.f) {
+        snprintf(buf, sz, "%.1f Mb/s", mbps);
+    } else if (mbps >= 0.001f) {
+        float kbps = mbps * 1000.f;
+        snprintf(buf, sz, "%.0f kb/s", kbps);
+    } else {
+        snprintf(buf, sz, "0 kb/s");
+    }
+}
+
 static void apply_page4_net(float rx_mbps, float tx_mbps, bool have_net)
 {
-    char buf[24];
+    char buf[28];
     if (!have_net) {
         lv_label_set_text(pages[4].lbl_a, "n/a");
         lv_label_set_text(pages[4].lbl_b, "n/a");
@@ -380,22 +414,25 @@ static void apply_page4_net(float rx_mbps, float tx_mbps, bool have_net)
         anim_meter_go(&g_ma4b, 0);
         return;
     }
-    float arx = rx_mbps * (100.f / NET_METER_MAX_MBPS);
+    float max_ref = g_net_max_mbps;
+    if (max_ref < 1.f)
+        max_ref = 1.f;
+    float arx = rx_mbps * (100.f / max_ref);
     if (arx < 0.f)
         arx = 0.f;
     if (arx > 100.f)
         arx = 100.f;
-    float atx = tx_mbps * (100.f / NET_METER_MAX_MBPS);
+    float atx = tx_mbps * (100.f / max_ref);
     if (atx < 0.f)
         atx = 0.f;
     if (atx > 100.f)
         atx = 100.f;
     anim_meter_go(&g_ma4a, (int32_t)(arx + 0.5f));
     anim_meter_go(&g_ma4b, (int32_t)(atx + 0.5f));
-    snprintf(buf, sizeof(buf), "%.1f", rx_mbps);
+    fmt_net_speed_mbps(buf, sizeof(buf), rx_mbps);
     lv_label_set_text(pages[4].lbl_a, buf);
     lv_obj_set_style_text_color(pages[4].lbl_a, lv_color_hex(0xf0f2f8), LV_PART_MAIN);
-    snprintf(buf, sizeof(buf), "%.1f", tx_mbps);
+    fmt_net_speed_mbps(buf, sizeof(buf), tx_mbps);
     lv_label_set_text(pages[4].lbl_b, buf);
     lv_obj_set_style_text_color(pages[4].lbl_b, lv_color_hex(0xf0f2f8), LV_PART_MAIN);
 }
@@ -410,7 +447,7 @@ static void apply_page2(float cpu, float temp_c, bool have_temp)
     char buf[24];
     snprintf(buf, sizeof(buf), "%.0f%%", cpu);
     lv_label_set_text(pages[2].lbl_a, buf);
-    if (cpu >= CPU_WARN_PCT)
+    if (cpu >= g_warn_cpu)
         lv_obj_set_style_text_color(pages[2].lbl_a, lv_color_hex(0xf87171), LV_PART_MAIN);
     else
         lv_obj_set_style_text_color(pages[2].lbl_a, lv_color_hex(0xf0f2f8), LV_PART_MAIN);
@@ -422,7 +459,7 @@ static void apply_page2(float cpu, float temp_c, bool have_temp)
             t = 100.f;
         t_arc = (int32_t)(t + 0.5f);
         snprintf(buf, sizeof(buf), "%.0fC", temp_c);
-        if (temp_c >= TEMP_WARN_C)
+        if (temp_c >= g_warn_temp)
             lv_obj_set_style_text_color(pages[2].lbl_b, lv_color_hex(0xf87171), LV_PART_MAIN);
         else
             lv_obj_set_style_text_color(pages[2].lbl_b, lv_color_hex(0xf0f2f8), LV_PART_MAIN);
@@ -454,11 +491,23 @@ static void apply_page1(float load1, float disk_pct, bool have_disk)
         anim_meter_go(&g_ma1b, (int32_t)(disk_pct + 0.5f));
         snprintf(buf, sizeof(buf), "%.0f%%", disk_pct);
         lv_label_set_text(pages[1].lbl_b, buf);
-        if (disk_pct >= DISK_WARN_PCT)
+        if (disk_pct >= g_warn_disk)
             lv_obj_set_style_text_color(pages[1].lbl_b, lv_color_hex(0xf87171), LV_PART_MAIN);
         else
             lv_obj_set_style_text_color(pages[1].lbl_b, lv_color_hex(0xf0f2f8), LV_PART_MAIN);
     }
+}
+
+static void set_status_usb_live(void)
+{
+    if (g_host_suffix.length() > 0) {
+        char st[64];
+        snprintf(st, sizeof(st), "USB live - %s", g_host_suffix.c_str());
+        lv_label_set_text(lbl_status, st);
+    } else {
+        lv_label_set_text(lbl_status, "USB live");
+    }
+    lv_obj_set_style_text_color(lbl_status, lv_color_hex(0x34d399), LV_PART_MAIN);
 }
 
 static void parse_line(const String &line)
@@ -468,15 +517,61 @@ static void parse_line(const String &line)
     if (s.length() == 0)
         return;
 
-    char tmp[160];
+    if (s.equalsIgnoreCase("R") || s.equalsIgnoreCase("RESET_PEAKS")) {
+        g_cpu_peak = 0.f;
+        g_ram_peak = 0.f;
+        apply_page3_peaks();
+        last_rx_ms = millis();
+        set_status_usb_live();
+        return;
+    }
+
+    if (s.length() >= 3 && s[0] == 'P' && s[1] == ' ') {
+        int pv = s.substring(2).toInt();
+        if (pv >= 1 && pv <= NUM_PAGES) {
+            show_page(pv - 1);
+            g_prefs.putUChar("page", (uint8_t)(pv - 1));
+            last_rx_ms = millis();
+            set_status_usb_live();
+        }
+        return;
+    }
+
+    if (s.length() >= 2 && (s[0] == 'H' || s[0] == 'h') && s[1] == ' ') {
+        String rest = s.substring(2);
+        rest.trim();
+        if (rest.length() > 32)
+            rest = rest.substring(0, 32);
+        g_host_suffix = rest;
+        last_rx_ms = millis();
+        set_status_usb_live();
+        return;
+    }
+
+    char tmp[200];
     if (s.length() >= (int)sizeof(tmp))
         return;
     s.toCharArray(tmp, sizeof(tmp));
 
     float cpu = 0, ram = 0, loadv = 0, diskv = 0, tempc = -1.f, netrx = 0.f, nettx = 0.f;
-    int n = sscanf(tmp, "%f,%f,%f,%f,%f,%f,%f", &cpu, &ram, &loadv, &diskv, &tempc, &netrx, &nettx);
+    float wc = g_warn_cpu, wr = g_warn_ram, wd = g_warn_disk, wt = g_warn_temp, nmax = g_net_max_mbps;
+    int n = sscanf(tmp, "%f,%f,%f,%f,%f,%f,%f,%f,%f,%f,%f,%f",
+                   &cpu, &ram, &loadv, &diskv, &tempc, &netrx, &nettx, &wc, &wr, &wd, &wt, &nmax);
 
     last_rx_ms = millis();
+
+    if (n >= 12) {
+        if (wc >= 1.f && wc <= 100.f)
+            g_warn_cpu = wc;
+        if (wr >= 1.f && wr <= 100.f)
+            g_warn_ram = wr;
+        if (wd >= 1.f && wd <= 100.f)
+            g_warn_disk = wd;
+        if (wt >= 1.f && wt <= 125.f)
+            g_warn_temp = wt;
+        if (nmax >= 1.f && nmax <= 10000.f)
+            g_net_max_mbps = nmax;
+    }
 
     if (n >= 2) {
         apply_page0(cpu, ram, true);
@@ -497,8 +592,7 @@ static void parse_line(const String &line)
     else
         apply_page4_net(0.f, 0.f, false);
 
-    lv_label_set_text(lbl_status, "USB live");
-    lv_obj_set_style_text_color(lbl_status, lv_color_hex(0x34d399), LV_PART_MAIN);
+    set_status_usb_live();
 }
 
 static void poll_serial(void)
@@ -512,7 +606,7 @@ static void poll_serial(void)
             serial_line = "";
             continue;
         }
-        if (serial_line.length() < 150)
+        if (serial_line.length() < 192)
             serial_line += c;
     }
 
@@ -613,10 +707,23 @@ void setup()
     lv_disp_drv_register(&disp_drv);
 
     is_initialized_lvgl = true;
-    build_ui();
 
-    btn_boot.attachClick([]() { show_page(active_page + 1); });
-    btn_io14.attachClick([]() { show_page(active_page - 1); });
+    g_prefs.begin("statsfeed", false);
+    build_ui();
+    {
+        uint8_t sp = g_prefs.getUChar("page", 0);
+        if (sp < NUM_PAGES)
+            show_page((int)sp);
+    }
+
+    btn_boot.attachClick([]() {
+        show_page(active_page + 1);
+        g_prefs.putUChar("page", (uint8_t)active_page);
+    });
+    btn_io14.attachClick([]() {
+        show_page(active_page - 1);
+        g_prefs.putUChar("page", (uint8_t)active_page);
+    });
 }
 
 void loop()

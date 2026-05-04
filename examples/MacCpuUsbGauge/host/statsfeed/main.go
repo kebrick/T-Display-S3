@@ -5,6 +5,7 @@
 //
 // Сборка: go build -o statsfeed .
 // Запуск: ./statsfeed  или  statsfeed.exe -port COM5
+// Протокол: см. README — 12 полей метрик + строка H …; rx/tx в мегабит/с.
 // Авто-порт: только USB CDC с признаками платы (VID Espressif 303A и т.д.), не первый /dev из списка.
 // -once: одна строка в stdout (+ запись в -port если задан). -quiet: меньше служебных логов.
 // -smooth: EMA для CPU/RAM/load/disk (0=выкл). -list-esp: только VID 303A.
@@ -15,7 +16,6 @@ package main
 
 import (
 	"context"
-	"errors"
 	"flag"
 	"fmt"
 	"log"
@@ -103,6 +103,43 @@ type feedConfig struct {
 	baud     int
 	interval time.Duration
 	smooth   float64
+	// Пороги и шкала сети для дисплея (12-е поле протокола).
+	WarnCPU, WarnRAM, WarnDisk, WarnTemp float64
+	NetMaxMbps                         float64
+	// HostLabel: пусто — os.Hostname(); "-" — не слать строку H … на плату.
+	HostLabel string
+	// StartPage: 1…5 — после подключения USB отправить "P n\n"; 0 — не слать (экран из NVS на плате).
+	StartPage int
+}
+
+func defaultBoardConfig() feedConfig {
+	return feedConfig{
+		WarnCPU: 85, WarnRAM: 88, WarnDisk: 92, WarnTemp: 85,
+		NetMaxMbps: 100,
+		HostLabel:  "",
+		StartPage:  0,
+	}
+}
+
+func serialHostPrefix(cfg feedConfig) []byte {
+	if strings.TrimSpace(cfg.HostLabel) == "-" {
+		return nil
+	}
+	name := strings.TrimSpace(cfg.HostLabel)
+	if name == "" {
+		h, err := os.Hostname()
+		if err != nil || h == "" {
+			return nil
+		}
+		name = h
+	}
+	name = strings.ReplaceAll(name, "\n", " ")
+	name = strings.ReplaceAll(name, ",", " ")
+	rn := []rune(name)
+	if len(rn) > 32 {
+		name = string(rn[:32])
+	}
+	return []byte("H " + name + "\n")
 }
 
 func sumNonLoopbackBytes() (recv uint64, sent uint64, err error) {
@@ -159,7 +196,8 @@ func netMbpsSince() (rx float64, tx float64) {
 
 // collectSampleLine одна строка протокола; primeCPU — первый раз вызвать с паузой для cpu.Percent.
 // emaAlpha: 0 = без сглаживания; 0.2–0.45 обычно достаточно (см. -smooth).
-func collectSampleLine(primeCPU *bool, emaAlpha float64) (string, error) {
+// board задаёт 5 дополнительных полей (пороги + net_max Мбит/с) для прошивки с 12 полями.
+func collectSampleLine(primeCPU *bool, emaAlpha float64, board feedConfig) (string, error) {
 	if !*primeCPU {
 		_, _ = cpu.Percent(150*time.Millisecond, false)
 		*primeCPU = true
@@ -201,7 +239,9 @@ func collectSampleLine(primeCPU *bool, emaAlpha float64) (string, error) {
 	tempC := pickCPUTempC()
 	cOut, rOut, lOut, dOut := trend.smooth(emaAlpha, cpuVal, vm.UsedPercent, load1, diskPct)
 	rxM, txM := netMbpsSince()
-	return fmt.Sprintf("%.1f,%.1f,%.2f,%.1f,%.1f,%.2f,%.2f\n", cOut, rOut, lOut, dOut, tempC, rxM, txM), nil
+	return fmt.Sprintf("%.1f,%.1f,%.2f,%.1f,%.1f,%.2f,%.2f,%.1f,%.1f,%.1f,%.1f,%.1f\n",
+		cOut, rOut, lOut, dOut, tempC, rxM, txM,
+		board.WarnCPU, board.WarnRAM, board.WarnDisk, board.WarnTemp, board.NetMaxMbps), nil
 }
 
 func main() {
@@ -230,19 +270,18 @@ func main() {
 		return
 	}
 
-	cfg := feedConfig{
-		portHint: strings.TrimSpace(*portFlag),
-		baud:     *baud,
-		interval: *interval,
-		smooth:   *smooth,
-	}
+	cfg := defaultBoardConfig()
+	cfg.portHint = strings.TrimSpace(*portFlag)
+	cfg.baud = *baud
+	cfg.interval = *interval
+	cfg.smooth = *smooth
 	rt := newFeedRuntime(cfg)
 
 	mode := &serial.Mode{BaudRate: cfg.baud, DataBits: 8, Parity: serial.NoParity, StopBits: serial.OneStopBit}
 	cpuPrimed := false
 
 	if *once {
-		line, err := collectSampleLine(&cpuPrimed, cfg.smooth)
+		line, err := collectSampleLine(&cpuPrimed, cfg.smooth, cfg)
 		if err != nil {
 			log.Fatal(err)
 		}
@@ -268,6 +307,13 @@ func main() {
 		if isTrayDetachedChild() {
 			signal.Ignore(syscall.SIGHUP)
 		}
+	}
+	if !ensureSingleRunningInstance() {
+		exitIfAlreadyRunning()
+	}
+	defer releaseInstanceLock()
+
+	if useTray {
 		setupTrayLogForGUI()
 		vlogf("режим трея: иконка statsfeed; «Параметры…» — настройки; «Выход» — завершение.")
 		ctx, cancel := context.WithCancel(context.Background())
@@ -318,8 +364,12 @@ func runSerialFeed(ctx context.Context, rt *feedRuntime) {
 
 		trend = trendEMA{}
 		netBpsInit = false
-		_, _ = collectSampleLine(&cpuPrimed, cfg.smooth)
+		primeCfg := rt.snapshot()
+		_, _ = collectSampleLine(&cpuPrimed, primeCfg.smooth, primeCfg)
 		_ = p.ResetInputBuffer()
+		if sp := primeCfg.StartPage; sp >= 1 && sp <= 5 {
+			_, _ = p.Write([]byte(fmt.Sprintf("P %d\n", sp)))
+		}
 		openedName := port
 		_ = p.SetReadTimeout(readProbeTimeout)
 		vlogf("connected %s @ %d", openedName, cfg.baud)
@@ -345,8 +395,8 @@ func runSerialFeed(ctx context.Context, rt *feedRuntime) {
 
 			if time.Since(lastPortVerify) >= portVerifyInterval {
 				lastPortVerify = time.Now()
-				if serialReadSaysClosed(p) {
-					log.Printf("serial read: port closed — reconnect")
+				if serialReadSaysClosed(p) || serialPortProbeHWDead(p) {
+					log.Printf("serial: link lost (read/HW probe) — reconnect")
 					disconnected = true
 					break
 				}
@@ -363,7 +413,7 @@ func runSerialFeed(ctx context.Context, rt *feedRuntime) {
 			}
 
 			cfgLive := rt.snapshot()
-			line, err := collectSampleLine(&cpuPrimed, cfgLive.smooth)
+			line, err := collectSampleLine(&cpuPrimed, cfgLive.smooth, cfgLive)
 			if err != nil {
 				vlogf("sample: %v", err)
 				if sleepOrCtx(ctx, cfgLive.interval) {
@@ -371,6 +421,12 @@ func runSerialFeed(ctx context.Context, rt *feedRuntime) {
 					break
 				}
 				continue
+			}
+			if extra := rt.takePendingBoard(); len(extra) > 0 {
+				_, _ = p.Write(extra)
+			}
+			if px := serialHostPrefix(cfgLive); len(px) > 0 {
+				_, _ = p.Write(px)
 			}
 			if _, err := p.Write([]byte(line)); err != nil {
 				log.Printf("write: %v — reconnect", err)
@@ -434,6 +490,25 @@ func readCPUTempCSensors() (v float64) {
 	return -1
 }
 
+// normalizeSerialPortName убирает пробелы и префикс \\.\ (Windows, COM10+ и ручной ввод).
+func normalizeSerialPortName(name string) string {
+	s := strings.TrimSpace(name)
+	if runtime.GOOS == "windows" {
+		s = strings.TrimPrefix(s, `\\.\`)
+	}
+	return s
+}
+
+// serialPortNamesMatch сравнивает имя открытого порта с записью из enumerator (Windows: COM без учёта регистра).
+func serialPortNamesMatch(a, b string) bool {
+	na := normalizeSerialPortName(a)
+	nb := normalizeSerialPortName(b)
+	if runtime.GOOS == "windows" {
+		return strings.EqualFold(na, nb)
+	}
+	return na == nb
+}
+
 // portInEnumerator: при отключении USB узел /dev/cu… исчезает, а Write может не вернуть ошибку.
 func portInEnumerator(name string) bool {
 	ports, err := enumerator.GetDetailedPortsList()
@@ -441,22 +516,19 @@ func portInEnumerator(name string) bool {
 		return true
 	}
 	for _, p := range ports {
-		if p.Name == name {
+		if p != nil && serialPortNamesMatch(name, p.Name) {
 			return true
 		}
 	}
 	return false
 }
 
-// serialReadSaysClosed: короткий Read ловит PortClosed / нулевой чтение (Linux CDC), если драйвер сообщил об отвале.
+// serialReadSaysClosed: короткий Read с таймаутом; при отвале USB на Windows драйвер часто даёт ошибку без PortClosed.
 func serialReadSaysClosed(p serial.Port) bool {
 	buf := make([]byte, 64)
 	n, err := p.Read(buf)
 	if err != nil {
-		var pe *serial.PortError
-		if errors.As(err, &pe) && pe.Code() == serial.PortClosed {
-			return true
-		}
+		return true
 	}
 	_ = n
 	return false

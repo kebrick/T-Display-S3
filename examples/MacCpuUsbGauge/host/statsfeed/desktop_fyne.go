@@ -94,7 +94,29 @@ func openSettingsWindow(a fyne.App, rt *feedRuntime) {
 	smoothE := widget.NewEntry()
 	smoothE.SetText(strconv.FormatFloat(snap.smooth, 'f', -1, 64))
 
-	hint := widget.NewLabel("Поток USB CDC к дисплею. После «Сохранить» параметры подхватываются при следующем цикле (порт переподключается). Позже сюда можно добавить запись в файл конфигурации.")
+	warnCPUE := widget.NewEntry()
+	warnCPUE.SetText(strconv.FormatFloat(snap.WarnCPU, 'f', -1, 64))
+	warnRAME := widget.NewEntry()
+	warnRAME.SetText(strconv.FormatFloat(snap.WarnRAM, 'f', -1, 64))
+	warnDiskE := widget.NewEntry()
+	warnDiskE.SetText(strconv.FormatFloat(snap.WarnDisk, 'f', -1, 64))
+	warnTempE := widget.NewEntry()
+	warnTempE.SetText(strconv.FormatFloat(snap.WarnTemp, 'f', -1, 64))
+	netMaxE := widget.NewEntry()
+	netMaxE.SetText(strconv.FormatFloat(snap.NetMaxMbps, 'f', -1, 64))
+	hostE := widget.NewEntry()
+	hostE.SetText(snap.HostLabel)
+	hostE.SetPlaceHolder("пусто = имя ПК; «-» без подписи внизу экрана")
+
+	startPageE := widget.NewEntry()
+	if snap.StartPage == 0 {
+		startPageE.SetText("0")
+	} else {
+		startPageE.SetText(strconv.Itoa(snap.StartPage))
+	}
+	startPageE.SetPlaceHolder("0 = не слать; 1…5 экран при подключении")
+
+	hint := widget.NewLabel("USB CDC: 12 полей, H …, команды P n / R на плате. Экран при старте — из NVS (кнопки) или P с хоста. «Сохранить» при смене порта — переподключение.")
 	hint.Wrapping = fyne.TextWrapWord
 
 	form := widget.NewForm(
@@ -102,9 +124,20 @@ func openSettingsWindow(a fyne.App, rt *feedRuntime) {
 		widget.NewFormItem("Скорость (baud)", baudE),
 		widget.NewFormItem("Интервал (мс)", intervalMsE),
 		widget.NewFormItem("Сглаживание smooth", smoothE),
+		widget.NewFormItem("Порог CPU %", warnCPUE),
+		widget.NewFormItem("Порог RAM %", warnRAME),
+		widget.NewFormItem("Порог диск %", warnDiskE),
+		widget.NewFormItem("Порог темп. °C", warnTempE),
+		widget.NewFormItem("Шкала сети max (Мбит/с)", netMaxE),
+		widget.NewFormItem("Подпись на плате", hostE),
+		widget.NewFormItem("Экран при USB (1…5, 0=авто)", startPageE),
 	)
 
 	win := a.NewWindow("Параметры statsfeed")
+	resetPeaks := widget.NewButton("Сброс пиков pk/rk", func() {
+		rt.EnqueueBoardLine("R\n")
+		dialog.ShowInformation("Команда", "Отправлена команда сброса пиков (R) на следующий тик USB.", win)
+	})
 	save := widget.NewButton("Сохранить", func() {
 		baud, err := strconv.Atoi(strings.TrimSpace(baudE.Text))
 		if err != nil || baud < 300 {
@@ -121,20 +154,57 @@ func openSettingsWindow(a fyne.App, rt *feedRuntime) {
 			dialog.ShowError(fmt.Errorf("smooth: число от 0 до 1"), win)
 			return
 		}
+		wc, err := strconv.ParseFloat(strings.TrimSpace(warnCPUE.Text), 64)
+		if err != nil || wc < 1 || wc > 100 {
+			dialog.ShowError(fmt.Errorf("порог CPU: 1…100"), win)
+			return
+		}
+		wr, err := strconv.ParseFloat(strings.TrimSpace(warnRAME.Text), 64)
+		if err != nil || wr < 1 || wr > 100 {
+			dialog.ShowError(fmt.Errorf("порог RAM: 1…100"), win)
+			return
+		}
+		wd, err := strconv.ParseFloat(strings.TrimSpace(warnDiskE.Text), 64)
+		if err != nil || wd < 1 || wd > 100 {
+			dialog.ShowError(fmt.Errorf("порог диск: 1…100"), win)
+			return
+		}
+		wt, err := strconv.ParseFloat(strings.TrimSpace(warnTempE.Text), 64)
+		if err != nil || wt < 1 || wt > 125 {
+			dialog.ShowError(fmt.Errorf("порог температуры: 1…125"), win)
+			return
+		}
+		nm, err := strconv.ParseFloat(strings.TrimSpace(netMaxE.Text), 64)
+		if err != nil || nm < 1 || nm > 10000 {
+			dialog.ShowError(fmt.Errorf("шкала сети: 1…10000 Мбит/с"), win)
+			return
+		}
+		sp, err := strconv.Atoi(strings.TrimSpace(startPageE.Text))
+		if err != nil || sp < 0 || sp > 5 {
+			dialog.ShowError(fmt.Errorf("экран при USB: 0 или 1…5"), win)
+			return
+		}
 		next := feedConfig{
-			portHint: strings.TrimSpace(portE.Text),
-			baud:     baud,
-			interval: time.Duration(ms) * time.Millisecond,
-			smooth:   sm,
+			portHint:   strings.TrimSpace(portE.Text),
+			baud:       baud,
+			interval:   time.Duration(ms) * time.Millisecond,
+			smooth:     sm,
+			WarnCPU:    wc,
+			WarnRAM:    wr,
+			WarnDisk:   wd,
+			WarnTemp:   wt,
+			NetMaxMbps: nm,
+			HostLabel:  strings.TrimSpace(hostE.Text),
+			StartPage:  sp,
 		}
 		rt.apply(next)
 		dialog.ShowInformation("Сохранено", "Настройки применены; при необходимости порт переподключится.", win)
 	})
 	closeBtn := widget.NewButton("Закрыть", func() { win.Close() })
-	btns := container.NewHBox(save, closeBtn)
+	btns := container.NewHBox(save, resetPeaks, closeBtn)
 
 	win.SetContent(container.NewVBox(hint, widget.NewSeparator(), form, btns))
-	win.Resize(fyne.NewSize(460, 320))
+	win.Resize(fyne.NewSize(520, 560))
 	win.CenterOnScreen()
 	win.Show()
 }
