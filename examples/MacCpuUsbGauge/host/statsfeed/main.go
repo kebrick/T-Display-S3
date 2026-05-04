@@ -8,7 +8,7 @@
 // Авто-порт: только USB CDC с признаками платы (VID Espressif 303A и т.д.), не первый /dev из списка.
 // -once: одна строка в stdout (+ запись в -port если задан). -quiet: меньше служебных логов.
 // -smooth: EMA для CPU/RAM/load/disk (0=выкл). -list-esp: только VID 303A.
-// -tray (только macOS, CGO): иконка в строке меню и пункт «Выход»; окна приложения нет.
+// macOS/Windows: по умолчанию сразу трей (строка меню / область уведомлений); -foreground — только терминал.
 
 package main
 
@@ -209,7 +209,7 @@ func main() {
 	interval := flag.Duration("i", 250*time.Millisecond, "update interval")
 	once := flag.Bool("once", false, "print one CSV line to stdout and exit (if -port set, also write to serial once)")
 	smooth := flag.Float64("smooth", 0, "EMA alpha for CPU/RAM/load/disk on wire (0=off, try 0.25-0.4)")
-	tray := flag.Bool("tray", false, "macOS: menu bar icon only; quit from tray menu (no separate app window)")
+	foreground := flag.Bool("foreground", false, "macOS/Windows: stay in terminal/console (no tray); Linux: no effect")
 	flag.BoolVar(&quiet, "quiet", false, "fewer log lines (errors and reconnect still logged)")
 	flag.Parse()
 
@@ -225,10 +225,6 @@ func main() {
 			fmt.Printf("%s\t%s\t%s\n", p.Name, p.VID, p.PID)
 		}
 		return
-	}
-
-	if *tray && *once {
-		log.Fatal("-tray and -once cannot be used together")
 	}
 
 	cfg := feedConfig{
@@ -262,11 +258,9 @@ func main() {
 		return
 	}
 
-	if *tray {
-		if runtime.GOOS != "darwin" {
-			log.Fatal("-tray is only supported on macOS")
-		}
-		vlogf("режим строки меню: иконка statsfeed; завершение — пункт «Выход».")
+	useTray := (runtime.GOOS == "darwin" || runtime.GOOS == "windows") && !*foreground
+	if useTray {
+		vlogf("режим трея: иконка statsfeed; завершение — пункт «Выход».")
 		ctx, cancel := context.WithCancel(context.Background())
 		defer cancel()
 		go runSerialFeed(ctx, cfg)

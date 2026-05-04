@@ -1,4 +1,4 @@
-//go:build darwin && !ios
+//go:build (darwin && !ios) || windows
 
 package main
 
@@ -8,10 +8,11 @@ import (
 	"fyne.io/systray"
 )
 
-// Минимальная PNG-иконка для строки меню (без внешних файлов).
+// Минимальная PNG-иконка для трея / строки меню (без внешних файлов).
 const trayIconPNG64 = "iVBORw0KGgoAAAANSUhEUgAAABAAAAAQCAYAAAAf8/9hAAAAGklEQVQ4T2NkYGD4z0ABYBw1GEGAARgHBKMDAAv9Bj0a6QdKAAAAAElFTkSuQmCC"
 
 func runTrayBlocking(onQuit func()) {
+	hideConsoleWindow()
 	systray.Run(func() {
 		if raw, err := base64.StdEncoding.DecodeString(trayIconPNG64); err == nil && len(raw) > 0 {
 			systray.SetIcon(raw)
