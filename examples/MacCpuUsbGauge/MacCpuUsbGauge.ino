@@ -315,7 +315,7 @@ static void build_ui(void)
     g_ma4b = {pages[4].meter_b, pages[4].ind_b, 0};
 
     lbl_status = lv_label_create(scr);
-    /* Только ASCII: Montserrat без U+00B7 / кириллицы / «длинного тире» */
+    /* Текст статуса — только печатный ASCII (см. status_ascii_only + шрифт без лишних глифов). */
     lv_label_set_text(lbl_status, "USB wait");
     lv_obj_set_style_text_font(lbl_status, &lv_font_montserrat_12, LV_PART_MAIN);
     lv_obj_set_style_text_color(lbl_status, lv_color_hex(0x6b7280), LV_PART_MAIN);
@@ -498,11 +498,34 @@ static void apply_page1(float load1, float disk_pct, bool have_disk)
     }
 }
 
+/* Подпись в статусе: только печатный ASCII — в lv_font_montserrat_12 нет «·», дефиса и др., иначе «тофу». */
+static void status_ascii_only(char *dst, size_t dstsz, const char *src)
+{
+    size_t j = 0;
+    if (!dst || dstsz == 0)
+        return;
+    if (!src) {
+        dst[0] = '\0';
+        return;
+    }
+    for (size_t i = 0; src[i] != '\0' && j + 1 < dstsz; i++) {
+        unsigned char c = (unsigned char)src[i];
+        if (c >= 0x20 && c <= 0x7e)
+            dst[j++] = (char)c;
+    }
+    dst[j] = '\0';
+}
+
 static void set_status_usb_live(void)
 {
     if (g_host_suffix.length() > 0) {
+        char hostdisp[40];
+        status_ascii_only(hostdisp, sizeof(hostdisp), g_host_suffix.c_str());
         char st[64];
-        snprintf(st, sizeof(st), "USB live - %s", g_host_suffix.c_str());
+        if (hostdisp[0] != '\0')
+            snprintf(st, sizeof(st), "USB live %s", hostdisp);
+        else
+            snprintf(st, sizeof(st), "USB live");
         lv_label_set_text(lbl_status, st);
     } else {
         lv_label_set_text(lbl_status, "USB live");
