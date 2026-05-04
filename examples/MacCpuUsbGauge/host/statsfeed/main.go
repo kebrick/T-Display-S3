@@ -8,7 +8,7 @@
 // Авто-порт: только USB CDC с признаками платы (VID Espressif 303A и т.д.), не первый /dev из списка.
 // -once: одна строка в stdout (+ запись в -port если задан). -quiet: меньше служебных логов.
 // -smooth: EMA для CPU/RAM/load/disk (0=выкл). -list-esp: только VID 303A.
-// macOS/Windows: по умолчанию сразу трей (строка меню / область уведомлений); -foreground — только терминал.
+// macOS/Windows: по умолчанию трей (Fyne) + окно «Параметры…»; -foreground — только терминал.
 
 package main
 
@@ -233,6 +233,7 @@ func main() {
 		interval: *interval,
 		smooth:   *smooth,
 	}
+	rt := newFeedRuntime(cfg)
 
 	mode := &serial.Mode{BaudRate: cfg.baud, DataBits: 8, Parity: serial.NoParity, StopBits: serial.OneStopBit}
 	cpuPrimed := false
@@ -260,20 +261,19 @@ func main() {
 
 	useTray := (runtime.GOOS == "darwin" || runtime.GOOS == "windows") && !*foreground
 	if useTray {
-		vlogf("режим трея: иконка statsfeed; завершение — пункт «Выход».")
+		vlogf("режим трея: иконка statsfeed; «Параметры…» — настройки; «Выход» — завершение.")
 		ctx, cancel := context.WithCancel(context.Background())
 		defer cancel()
-		go runSerialFeed(ctx, cfg)
-		runTrayBlocking(cancel)
+		go runSerialFeed(ctx, rt)
+		runDesktopBlocking(cancel, rt)
 		return
 	}
 
 	vlogf("Ctrl+C to exit. On USB disconnect we wait and reconnect.")
-	runSerialFeed(context.Background(), cfg)
+	runSerialFeed(context.Background(), rt)
 }
 
-func runSerialFeed(ctx context.Context, cfg feedConfig) {
-	mode := &serial.Mode{BaudRate: cfg.baud, DataBits: 8, Parity: serial.NoParity, StopBits: serial.OneStopBit}
+func runSerialFeed(ctx context.Context, rt *feedRuntime) {
 	cpuPrimed := false
 
 	for {
@@ -283,6 +283,8 @@ func runSerialFeed(ctx context.Context, cfg feedConfig) {
 		default:
 		}
 
+		cfg := rt.snapshot()
+		mode := &serial.Mode{BaudRate: cfg.baud, DataBits: 8, Parity: serial.NoParity, StopBits: serial.OneStopBit}
 		port := cfg.portHint
 		if port == "" {
 			port = pickSerialPort()
@@ -303,6 +305,8 @@ func runSerialFeed(ctx context.Context, cfg feedConfig) {
 			}
 			continue
 		}
+
+		openRev := rt.revSnapshot()
 
 		trend = trendEMA{}
 		netBpsInit = false
@@ -325,6 +329,12 @@ func runSerialFeed(ctx context.Context, cfg feedConfig) {
 				break
 			}
 
+			if rt.revSnapshot() != openRev {
+				vlogf("настройки изменены — переподключение")
+				disconnected = true
+				break
+			}
+
 			if time.Since(lastPortVerify) >= portVerifyInterval {
 				lastPortVerify = time.Now()
 				if serialReadSaysClosed(p) {
@@ -344,10 +354,11 @@ func runSerialFeed(ctx context.Context, cfg feedConfig) {
 				}
 			}
 
-			line, err := collectSampleLine(&cpuPrimed, cfg.smooth)
+			cfgLive := rt.snapshot()
+			line, err := collectSampleLine(&cpuPrimed, cfgLive.smooth)
 			if err != nil {
 				vlogf("sample: %v", err)
-				if sleepOrCtx(ctx, cfg.interval) {
+				if sleepOrCtx(ctx, cfgLive.interval) {
 					disconnected = true
 					break
 				}
@@ -358,7 +369,7 @@ func runSerialFeed(ctx context.Context, cfg feedConfig) {
 				disconnected = true
 				break
 			}
-			if sleepOrCtx(ctx, cfg.interval) {
+			if sleepOrCtx(ctx, cfgLive.interval) {
 				disconnected = true
 				break
 			}
@@ -397,7 +408,8 @@ func readCPUTempCSensors() (v float64) {
 	for _, t := range temps {
 		k := strings.ToLower(t.SensorKey)
 		if strings.Contains(k, "cpu") || strings.Contains(k, "core") || strings.Contains(k, "package") ||
-			strings.Contains(k, "k10temp") || strings.Contains(k, "acpitz") {
+			strings.Contains(k, "k10temp") || strings.Contains(k, "acpitz") ||
+			(runtime.GOOS == "windows" && (strings.Contains(k, "acpi") || strings.Contains(k, "thermal") || strings.Contains(k, "tz."))) {
 			if t.Temperature > 1 && t.Temperature < 125 {
 				return t.Temperature
 			}
@@ -407,6 +419,9 @@ func readCPUTempCSensors() (v float64) {
 		if t.Temperature > 1 && t.Temperature < 125 {
 			return t.Temperature
 		}
+	}
+	if t := readWindowsAuxiliaryCPUTemp(); t > 0 {
+		return t
 	}
 	return -1
 }

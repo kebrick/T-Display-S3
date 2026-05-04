@@ -4,7 +4,8 @@ package main
 
 import "log"
 
-func runTrayBlocking(onQuit func()) {
+func runDesktopBlocking(onQuit func(), rt *feedRuntime) {
 	_ = onQuit
-	log.Fatal("internal error: runTrayBlocking is only used on macOS/Windows")
+	_ = rt
+	log.Fatal("internal error: runDesktopBlocking is only used on macOS/Windows")
 }
