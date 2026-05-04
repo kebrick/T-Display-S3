@@ -8,10 +8,12 @@
 // Авто-порт: только USB CDC с признаками платы (VID Espressif 303A и т.д.), не первый /dev из списка.
 // -once: одна строка в stdout (+ запись в -port если задан). -quiet: меньше служебных логов.
 // -smooth: EMA для CPU/RAM/load/disk (0=выкл). -list-esp: только VID 303A.
+// -tray (только macOS, CGO): иконка в строке меню и пункт «Выход»; окна приложения нет.
 
 package main
 
 import (
+	"context"
 	"errors"
 	"flag"
 	"fmt"
@@ -81,6 +83,23 @@ func vlogf(format string, args ...interface{}) {
 	if !quiet {
 		log.Printf(format, args...)
 	}
+}
+
+// sleepOrCtx: true — ctx отменён, пора выйти из цикла.
+func sleepOrCtx(ctx context.Context, d time.Duration) bool {
+	select {
+	case <-ctx.Done():
+		return true
+	case <-time.After(d):
+		return false
+	}
+}
+
+type feedConfig struct {
+	portHint string
+	baud     int
+	interval time.Duration
+	smooth   float64
 }
 
 func sumNonLoopbackBytes() (recv uint64, sent uint64, err error) {
@@ -190,6 +209,7 @@ func main() {
 	interval := flag.Duration("i", 250*time.Millisecond, "update interval")
 	once := flag.Bool("once", false, "print one CSV line to stdout and exit (if -port set, also write to serial once)")
 	smooth := flag.Float64("smooth", 0, "EMA alpha for CPU/RAM/load/disk on wire (0=off, try 0.25-0.4)")
+	tray := flag.Bool("tray", false, "macOS: menu bar icon only; quit from tray menu (no separate app window)")
 	flag.BoolVar(&quiet, "quiet", false, "fewer log lines (errors and reconnect still logged)")
 	flag.Parse()
 
@@ -207,17 +227,27 @@ func main() {
 		return
 	}
 
-	mode := &serial.Mode{BaudRate: *baud, DataBits: 8, Parity: serial.NoParity, StopBits: serial.OneStopBit}
-	portHint := strings.TrimSpace(*portFlag)
+	if *tray && *once {
+		log.Fatal("-tray and -once cannot be used together")
+	}
+
+	cfg := feedConfig{
+		portHint: strings.TrimSpace(*portFlag),
+		baud:     *baud,
+		interval: *interval,
+		smooth:   *smooth,
+	}
+
+	mode := &serial.Mode{BaudRate: cfg.baud, DataBits: 8, Parity: serial.NoParity, StopBits: serial.OneStopBit}
 	cpuPrimed := false
 
 	if *once {
-		line, err := collectSampleLine(&cpuPrimed, *smooth)
+		line, err := collectSampleLine(&cpuPrimed, cfg.smooth)
 		if err != nil {
 			log.Fatal(err)
 		}
 		fmt.Print(line)
-		port := portHint
+		port := cfg.portHint
 		if port == "" {
 			port = pickSerialPort()
 		}
@@ -232,38 +262,75 @@ func main() {
 		return
 	}
 
+	if *tray {
+		if runtime.GOOS != "darwin" {
+			log.Fatal("-tray is only supported on macOS")
+		}
+		vlogf("режим строки меню: иконка statsfeed; завершение — пункт «Выход».")
+		ctx, cancel := context.WithCancel(context.Background())
+		defer cancel()
+		go runSerialFeed(ctx, cfg)
+		runTrayBlocking(cancel)
+		return
+	}
+
 	vlogf("Ctrl+C to exit. On USB disconnect we wait and reconnect.")
+	runSerialFeed(context.Background(), cfg)
+}
+
+func runSerialFeed(ctx context.Context, cfg feedConfig) {
+	mode := &serial.Mode{BaudRate: cfg.baud, DataBits: 8, Parity: serial.NoParity, StopBits: serial.OneStopBit}
+	cpuPrimed := false
 
 	for {
-		port := portHint
+		select {
+		case <-ctx.Done():
+			return
+		default:
+		}
+
+		port := cfg.portHint
 		if port == "" {
 			port = pickSerialPort()
 		}
 		if port == "" {
 			vlogf("no serial port, retry in %v", noPortDelay)
-			time.Sleep(noPortDelay)
+			if sleepOrCtx(ctx, noPortDelay) {
+				return
+			}
 			continue
 		}
 
 		p, err := serial.Open(port, mode)
 		if err != nil {
 			log.Printf("open %s: %v — retry in %v", port, err, reconnectDelay)
-			time.Sleep(reconnectDelay)
+			if sleepOrCtx(ctx, reconnectDelay) {
+				return
+			}
 			continue
 		}
 
 		trend = trendEMA{}
 		netBpsInit = false
-		_, _ = collectSampleLine(&cpuPrimed, *smooth)
+		_, _ = collectSampleLine(&cpuPrimed, cfg.smooth)
 		_ = p.ResetInputBuffer()
 		openedName := port
 		_ = p.SetReadTimeout(readProbeTimeout)
-		vlogf("connected %s @ %d", openedName, *baud)
+		vlogf("connected %s @ %d", openedName, cfg.baud)
 
 		disconnected := false
 		lastPortVerify := time.Now()
 		portAbsent := 0
 		for !disconnected {
+			select {
+			case <-ctx.Done():
+				disconnected = true
+			default:
+			}
+			if disconnected {
+				break
+			}
+
 			if time.Since(lastPortVerify) >= portVerifyInterval {
 				lastPortVerify = time.Now()
 				if serialReadSaysClosed(p) {
@@ -283,10 +350,13 @@ func main() {
 				}
 			}
 
-			line, err := collectSampleLine(&cpuPrimed, *smooth)
+			line, err := collectSampleLine(&cpuPrimed, cfg.smooth)
 			if err != nil {
 				vlogf("sample: %v", err)
-				time.Sleep(*interval)
+				if sleepOrCtx(ctx, cfg.interval) {
+					disconnected = true
+					break
+				}
 				continue
 			}
 			if _, err := p.Write([]byte(line)); err != nil {
@@ -294,11 +364,16 @@ func main() {
 				disconnected = true
 				break
 			}
-			time.Sleep(*interval)
+			if sleepOrCtx(ctx, cfg.interval) {
+				disconnected = true
+				break
+			}
 		}
 
 		_ = p.Close()
-		time.Sleep(reconnectDelay)
+		if sleepOrCtx(ctx, reconnectDelay) {
+			return
+		}
 	}
 }
 

@@ -1,6 +1,6 @@
 Каталог: examples/MacCpuUsbGauge/host/statsfeed/
 
-go.mod / go.sum — go.bug.st/serial, gopsutil/v4 (температура: `sensors`; на Mac нужен **gopsutil v4.26.4+**, иначе на Apple Silicon возможен краш рантайма при частых вызовах). Сборка: **Go 1.24+**.
+go.mod / go.sum — go.bug.st/serial, gopsutil/v4 (температура: `sensors`; на Mac нужен **gopsutil v4.26.4+**, иначе на Apple Silicon возможен краш рантайма при частых вызовах), **fyne.io/systray** (только для **`-tray`** на macOS). Сборка: **Go 1.24+**.
 main.go — раз в -i (по умолчанию 250 ms) шлёт строку
 cpu%,ram%,load1m,disk%,cpuTempC,rx_mbps,tx_mbps\n
 (последние два поля — суммарная скорость приёма/передачи по всем интерфейсам кроме loopback, в Мбит/с по дельте счётчиков.)
@@ -10,6 +10,7 @@ Load: через gopsutil (на Windows часто 0 — это нормальн
 На дисплее цвет цифр при высоких значениях задаётся в прошивке (`CPU_WARN_PCT`, `RAM_WARN_PCT`, `DISK_WARN_PCT`, `TEMP_WARN_C` в `MacCpuUsbGauge.ino`).
 Команды:
 
+```
 cd examples/MacCpuUsbGauge/host/statsfeed
 go build -o statsfeed .
 ./statsfeed -list
@@ -18,3 +19,7 @@ go build -o statsfeed .
 ./statsfeed -quiet
 ./statsfeed -smooth 0.35
 ./statsfeed -list-esp
+./statsfeed -tray
+```
+
+Скрытый режим **`-tray`** (только **macOS**, нужен **CGO** / Xcode Command Line Tools): отдельного окна приложения нет — в **строке меню** (рядом с часами) появляется иконка; остановка — пункт **«Выход»** в её меню. Поток метрик по USB работает в фоне. Запуск из **Terminal** по-прежнему оставляет окно терминала; чтобы не было ни Dock, ни окна терминала, упакуйте бинарник в **.app** с `LSUIElement=true` в `Info.plist` или запускайте через **LaunchAgent**.
