@@ -253,6 +253,8 @@ func main() {
 	once := flag.Bool("once", false, "print one CSV line to stdout and exit (if -port set, also write to serial once)")
 	smooth := flag.Float64("smooth", 0, "EMA alpha for CPU/RAM/load/disk on wire (0=off, try 0.25-0.4)")
 	foreground := flag.Bool("foreground", false, "macOS/Windows: stay in terminal/console (no tray); Linux: no effect")
+	serveAddr := flag.String("serve", ":47800", "HTTP stats server address for KebrickSW watch (empty to disable)")
+	serveToken := flag.String("token", "", "shared token required in X-Token header (empty = open on LAN)")
 	flag.BoolVar(&quiet, "quiet", false, "fewer log lines (errors and reconnect still logged)")
 	flag.Parse()
 
@@ -299,6 +301,13 @@ func main() {
 			_ = p.Close()
 		}
 		return
+	}
+
+	// сетевой сервер метрик для часов KebrickSW (во всех режимах, кроме -once/-list)
+	if *serveAddr != "" {
+		startStatsServer(*serveAddr, *serveToken)
+		go runFallbackSampler(context.Background(), rt)
+		vlogf("HTTP stats server on %s (token=%v)", *serveAddr, *serveToken != "")
 	}
 
 	useTray := (runtime.GOOS == "darwin" || runtime.GOOS == "windows") && !*foreground
@@ -422,6 +431,7 @@ func runSerialFeed(ctx context.Context, rt *feedRuntime) {
 				}
 				continue
 			}
+			gSample.set(line) // публикуем для сетевого сервера метрик
 			if extra := rt.takePendingBoard(); len(extra) > 0 {
 				_, _ = p.Write(extra)
 			}
