@@ -254,9 +254,16 @@ func main() {
 	smooth := flag.Float64("smooth", 0, "EMA alpha for CPU/RAM/load/disk on wire (0=off, try 0.25-0.4)")
 	foreground := flag.Bool("foreground", false, "macOS/Windows: stay in terminal/console (no tray); Linux: no effect")
 	serveAddr := flag.String("serve", ":47800", "HTTP stats server address for KebrickSW watch (empty to disable)")
-	serveToken := flag.String("token", "", "shared token required in X-Token header (empty = open on LAN)")
+	serveToken := flag.String("token", "", "require this X-Token (persisted). empty + no -secure = open on LAN")
+	secure := flag.Bool("secure", false, "auto-generate & persist a token (print it); lock /stats")
+	showToken := flag.Bool("show-token", false, "print the saved access token and exit (headless)")
 	flag.BoolVar(&quiet, "quiet", false, "fewer log lines (errors and reconnect still logged)")
 	flag.Parse()
+
+	if *showToken {
+		fmt.Println(resolveToken("", false))
+		return
+	}
 
 	if *list || *listEsp {
 		ports, err := enumerator.GetDetailedPortsList()
@@ -303,13 +310,6 @@ func main() {
 		return
 	}
 
-	// сетевой сервер метрик для часов KebrickSW (во всех режимах, кроме -once/-list)
-	if *serveAddr != "" {
-		startStatsServer(*serveAddr, *serveToken)
-		go runFallbackSampler(context.Background(), rt)
-		vlogf("HTTP stats server on %s (token=%v)", *serveAddr, *serveToken != "")
-	}
-
 	useTray := (runtime.GOOS == "darwin" || runtime.GOOS == "windows") && !*foreground
 	if useTray {
 		maybeDetachTrayDarwin()
@@ -321,6 +321,25 @@ func main() {
 		exitIfAlreadyRunning()
 	}
 	defer releaseInstanceLock()
+
+	// сетевой сервер метрик для часов KebrickSW (только в единственном экземпляре)
+	if *serveAddr != "" {
+		/* default (no flags): open — часы находят хост сами, ничего настраивать не надо.
+		   -token X — явный токен; -secure — авто-токен (генерится и сохраняется). */
+		tok := ""
+		if *serveToken != "" {
+			tok = resolveToken(*serveToken, false)
+		} else if *secure {
+			tok = resolveToken("", false)
+		}
+		startStatsServer(*serveAddr, tok)
+		go runFallbackSampler(context.Background(), rt)
+		if tok == "" {
+			log.Printf("[statsfeed] HTTP stats on %s — OPEN (zero-config, без токена)", *serveAddr)
+		} else {
+			log.Printf("[statsfeed] HTTP stats on %s — token: %s  (файл: %s)", *serveAddr, tok, tokenPath())
+		}
+	}
 
 	if useTray {
 		setupTrayLogForGUI()

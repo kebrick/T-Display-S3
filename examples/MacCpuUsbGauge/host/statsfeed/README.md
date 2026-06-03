@@ -29,6 +29,26 @@ go build -o statsfeed .
 ./statsfeed -foreground
 ```
 
+**Сетевой сервер метрик для часов KebrickSW** (HTTP+JSON, порт по умолчанию `47800`):
+
+```
+./statsfeed                 # БЕЗ ФЛАГОВ: открыто в LAN — просто запустил и всё
+./statsfeed -secure         # включить токен (авто-генерится, сохраняется, печатается в лог)
+./statsfeed -show-token     # напечатать сохранённый токен и выйти (для headless/серверов)
+./statsfeed -token СЕКРЕТ     # задать свой токен (сохраняется)
+./statsfeed -serve :9000    # другой адрес/порт
+./statsfeed -serve ""       # выключить сетевой сервер (только USB)
+```
+
+По умолчанию (без флагов) сервер **открыт** в LAN — часы находят хост сами,
+ничего настраивать не надо. Токен включается `-secure`/`-token`, хранится в
+`UserConfigDir/statsfeed/token` (Win: `%AppData%\statsfeed\token`) и переживает
+перезапуск. **Windows:** собирается и работает (трей + сетевой сервер); сборка на
+Windows с **CGO** (Go 1.24+, gcc/mingw), запуск — двойным кликом по `statsfeed.exe`;
+лог `%LOCALAPPDATA%\statsfeed\statsfeed.log`.
+Эндпоинты: `GET /` → `statsfeed <host>` (health/discovery); `GET /stats` → JSON
+метрик (нужен заголовок `X-Token`, если токен задан). На часах всё в одном `monitor.json` (порт, опц. токен, список своих хостов).
+
 На **macOS** и **Windows** при обычном запуске (без **`-foreground`**) сразу **трей** и меню **«Параметры…»** — порт, baud, интервал, smooth, пороги CPU/RAM/диск/температура, шкала сети (Мбит/с), подпись на плате; **«Выход»** — завершение. На Windows консоль после старта **скрывается**. Служебные **логи** в режиме трея: **macOS** — `~/Library/Logs/statsfeed.log`, **Windows** — `%LOCALAPPDATA%\statsfeed\statsfeed.log`. **`-foreground`** — только терминал (Ctrl+C, логи в консоль). На **Linux** трея нет.
 
 - **macOS**: **CGO** / Xcode CLT. В режиме трея **без fork из Go**: **`syscall.Exec("/bin/sh", …)`** подставляет скрипт `nohup statsfeed … & exit` — fork делается только внутри shell (обход **`fork/exec … operation not permitted`** у процессов Go на части систем). Первые строки лога могут попасть в тот же **`~/Library/Logs/statsfeed.log`** (дозапись из `nohup`). Если окно Terminal **не закрывается** — в профиле оболочки включите **«При выходе из оболочки»: закрыть окно**, либо **.app** / Automator.
