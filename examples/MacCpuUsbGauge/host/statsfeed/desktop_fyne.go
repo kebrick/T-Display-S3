@@ -209,6 +209,75 @@ func openSettingsWindow(a fyne.App, rt *feedRuntime) {
 	win.Show()
 }
 
+// окно: список устройств (Принять/Блок/Разблок), добавление токена и журнал запросов
+func openWatchesWindow(a fyne.App) {
+	win := a.NewWindow("Часы — доступ и журнал")
+
+	rows := container.NewVBox()
+	logLbl := widget.NewLabel("")
+	logLbl.TextStyle = fyne.TextStyle{Monospace: true}
+
+	var refresh func()
+	refresh = func() {
+		rows.RemoveAll()
+		for _, d := range devList() {
+			tok := d.Token
+			short := tok
+			if len(short) > 12 {
+				short = short[:12] + "…"
+			}
+			status := string(d.Status)
+			info := widget.NewLabel(fmt.Sprintf("%-9s %s  %s", status, d.Id, short))
+			accept := widget.NewButton("Принять", func() { devAccept(tok); refresh() })
+			block := widget.NewButton("Блок", func() { devBlock(tok); refresh() })
+			unblock := widget.NewButton("Разблок", func() { devUnblock(tok); refresh() })
+			switch d.Status {
+			case devAccepted:
+				accept.Disable()
+			case devBlocked:
+				block.Disable()
+			default:
+				unblock.Disable()
+			}
+			rows.Add(container.NewHBox(info, accept, block, unblock))
+		}
+		if len(rows.Objects) == 0 {
+			rows.Add(widget.NewLabel("устройств пока нет"))
+		}
+		logLbl.SetText(strings.Join(devLogLines(40), "\n"))
+		rows.Refresh()
+	}
+
+	tokenE := widget.NewEntry()
+	tokenE.SetPlaceHolder("токен часов (экран ДОСТУП / identity.json)")
+	addBtn := widget.NewButton("Добавить в принятые", func() {
+		t := strings.TrimSpace(tokenE.Text)
+		if t == "" {
+			return
+		}
+		devAccept(t)
+		tokenE.SetText("")
+		refresh()
+	})
+	refreshBtn := widget.NewButton("Обновить", refresh)
+	closeBtn := widget.NewButton("Закрыть", func() { win.Close() })
+
+	refresh()
+	content := container.NewVBox(
+		widget.NewLabel("Устройства:"),
+		rows,
+		widget.NewSeparator(),
+		container.NewBorder(nil, nil, nil, addBtn, tokenE),
+		widget.NewSeparator(),
+		widget.NewLabel("Журнал запросов:"),
+		container.NewVScroll(logLbl),
+		container.NewHBox(refreshBtn, closeBtn),
+	)
+	win.SetContent(content)
+	win.Resize(fyne.NewSize(620, 640))
+	win.Show()
+}
+
 func runDesktopBlocking(onQuit func(), rt *feedRuntime) {
 	hideConsoleWindow()
 
@@ -231,6 +300,9 @@ func runDesktopBlocking(onQuit func(), rt *feedRuntime) {
 	menu := fyne.NewMenu("statsfeed",
 		fyne.NewMenuItem("Параметры…", func() {
 			openSettingsWindow(a, rt)
+		}),
+		fyne.NewMenuItem("Часы (доступ)…", func() {
+			openWatchesWindow(a)
 		}),
 		fyne.NewMenuItemSeparator(),
 		fyne.NewMenuItem("Выход", func() {

@@ -113,16 +113,8 @@ func sampleToJSON() ([]byte, bool) {
 	return b, true
 }
 
-func startStatsServer(addr, token string) {
+func startStatsServer(addr string) {
 	mux := http.NewServeMux()
-
-	checkToken := func(w http.ResponseWriter, r *http.Request) bool {
-		if token != "" && r.Header.Get("X-Token") != token {
-			http.Error(w, "unauthorized", http.StatusUnauthorized)
-			return false
-		}
-		return true
-	}
 
 	// discovery/health: дёшево и без токена, чтобы скан /24 был быстрым
 	mux.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) {
@@ -135,8 +127,13 @@ func startStatsServer(addr, token string) {
 		_, _ = w.Write([]byte("statsfeed " + host + "\n"))
 	})
 
+	// метрики: открыто всем, кроме заблокированных устройств (логируется)
 	mux.HandleFunc("/stats", func(w http.ResponseWriter, r *http.Request) {
-		if !checkToken(w, r) {
+		id := r.Header.Get("X-Watch-Id")
+		tok := r.Header.Get("X-Watch-Token")
+		if tok != "" && devIsBlocked(tok) {
+			devNote(id, tok, "/stats", "blocked")
+			http.Error(w, "blocked", http.StatusForbidden)
 			return
 		}
 		b, ok := sampleToJSON()
@@ -144,9 +141,47 @@ func startStatsServer(addr, token string) {
 			http.Error(w, "no sample yet", http.StatusServiceUnavailable)
 			return
 		}
+		devNote(id, tok, "/stats", "ok")
 		w.Header().Set("Content-Type", "application/json; charset=utf-8")
 		w.Header().Set("Access-Control-Allow-Origin", "*")
 		_, _ = w.Write(b)
+	})
+
+	// POST /pair — заявить о себе (часы появятся в GUI как pending).
+	mux.HandleFunc("/pair", func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodPost { http.Error(w, "POST only", http.StatusMethodNotAllowed); return }
+		var req struct{ Id, Token string }
+		dec := json.NewDecoder(http.MaxBytesReader(w, r.Body, 1024))
+		if err := dec.Decode(&req); err != nil || req.Token == "" { writeActionResult(w, false, "bad json"); return }
+		st := devNote(req.Id, req.Token, "/pair", "pair")
+		if st == devAccepted { writeActionResult(w, true, "уже принято"); return }
+		if st == devBlocked  { writeActionResult(w, false, "заблокировано"); return }
+		writeActionResult(w, true, "ожидает одобрения на хосте")
+	})
+
+	// POST /action — только для ПРИНЯТЫХ часов (тот же токен). Без флагов.
+	mux.HandleFunc("/action", func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodPost { http.Error(w, "POST only", http.StatusMethodNotAllowed); return }
+		id := r.Header.Get("X-Watch-Id")
+		tok := r.Header.Get("X-Watch-Token")
+		if tok == "" { writeActionResult(w, false, "нет токена устройства"); return }
+		if devIsBlocked(tok)  { devNote(id, tok, "/action", "blocked");  writeActionResult(w, false, "заблокировано"); return }
+		if !devIsAccepted(tok) {
+			devNote(id, tok, "/action", "denied(pending)")
+			log.Printf("[statsfeed] /action от %s не принято — одобрите в GUI/CLI (token %s)", id, tok)
+			writeActionResult(w, false, "устройство не принято на хосте")
+			return
+		}
+
+		var req struct{ Action, Cmd string }
+		dec := json.NewDecoder(http.MaxBytesReader(w, r.Body, 4096))
+		if err := dec.Decode(&req); err != nil { writeActionResult(w, false, "bad json"); return }
+
+		msg, err := runAction(req.Action, req.Cmd)
+		res := "ok"; if err != nil { res = "err" }
+		devNote(id, tok, "/action:"+req.Action, res)
+		log.Printf("[statsfeed] action by %s: %s -> %s", id, req.Action, res)
+		writeActionResult(w, err == nil, msg)
 	})
 
 	srv := &http.Server{

@@ -253,17 +253,26 @@ func main() {
 	once := flag.Bool("once", false, "print one CSV line to stdout and exit (if -port set, also write to serial once)")
 	smooth := flag.Float64("smooth", 0, "EMA alpha for CPU/RAM/load/disk on wire (0=off, try 0.25-0.4)")
 	foreground := flag.Bool("foreground", false, "macOS/Windows: stay in terminal/console (no tray); Linux: no effect")
-	serveAddr := flag.String("serve", ":47800", "HTTP stats server address for KebrickSW watch (empty to disable)")
-	serveToken := flag.String("token", "", "require this X-Token (persisted). empty + no -secure = open on LAN")
-	secure := flag.Bool("secure", false, "auto-generate & persist a token (print it); lock /stats")
-	showToken := flag.Bool("show-token", false, "print the saved access token and exit (headless)")
+	// конфигурация сервера — ТОЛЬКО через окружение (без флагов):
+	//   STATSFEED_SERVE (адрес, по умолчанию :47800; "" — выключить)
+	serveAddr := envOr("STATSFEED_SERVE", ":47800")
+	// headless-управление устройствами (операции, не конфиг):
+	devicesList := flag.Bool("devices", false, "list known watches and exit")
+	accept := flag.String("accept", "", "accept a watch by its token, then exit")
+	block := flag.String("block", "", "block a watch by its token, then exit")
+	unblock := flag.String("unblock", "", "unblock a watch by its token, then exit")
 	flag.BoolVar(&quiet, "quiet", false, "fewer log lines (errors and reconnect still logged)")
 	flag.Parse()
 
-	if *showToken {
-		fmt.Println(resolveToken("", false))
+	if *devicesList {
+		for _, d := range devList() {
+			fmt.Printf("%-9s %-18s %s\n", d.Status, d.Id, d.Token)
+		}
 		return
 	}
+	if *accept != ""  { devAccept(*accept);   fmt.Println("принято:",        *accept); return }
+	if *block != ""   { devBlock(*block);     fmt.Println("заблокировано:",  *block);  return }
+	if *unblock != "" { devUnblock(*unblock); fmt.Println("разблокировано:", *unblock); return }
 
 	if *list || *listEsp {
 		ports, err := enumerator.GetDetailedPortsList()
@@ -322,23 +331,12 @@ func main() {
 	}
 	defer releaseInstanceLock()
 
-	// сетевой сервер метрик для часов KebrickSW (только в единственном экземпляре)
-	if *serveAddr != "" {
-		/* default (no flags): open — часы находят хост сами, ничего настраивать не надо.
-		   -token X — явный токен; -secure — авто-токен (генерится и сохраняется). */
-		tok := ""
-		if *serveToken != "" {
-			tok = resolveToken(*serveToken, false)
-		} else if *secure {
-			tok = resolveToken("", false)
-		}
-		startStatsServer(*serveAddr, tok)
+	// сетевой сервер метрик/экшенов (config — только через env STATSFEED_SERVE)
+	if serveAddr != "" {
+		devLoad()
+		startStatsServer(serveAddr)
 		go runFallbackSampler(context.Background(), rt)
-		if tok == "" {
-			log.Printf("[statsfeed] HTTP stats on %s — OPEN (zero-config, без токена)", *serveAddr)
-		} else {
-			log.Printf("[statsfeed] HTTP stats on %s — token: %s  (файл: %s)", *serveAddr, tok, tokenPath())
-		}
+		log.Printf("[statsfeed] HTTP %s — метрики открыты; экшены только для принятых часов (devices: %s)", serveAddr, devicesPath())
 	}
 
 	if useTray {
